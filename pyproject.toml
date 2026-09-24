@@ -1,6 +1,6 @@
 [project]
 name = "von-sdk"
-version = "1.2.2"
+version = "1.2.3"
 description = "Von - The open-source System One decision model. Sub-25ms, local, calibrated decision primitives in homage to John von Neumann and Ludwig von Mises."
 authors = [
     { name = "Victor Hugo", email = "victor.panisa@gmail.com" }

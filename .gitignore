@@ -16,6 +16,9 @@ js/node_modules/
 
 _vizdoom.ini
 data_long/
+data_numeric/
+data_adequacy/
+data_continue/
 
 # Personal working notes - never publish.
 # Patterned rather than named: the two that leaked (SOTA.md,
@@ -33,3 +36,4 @@ SCRATCH*.md
 DRAFT*.md
 private/
 .private/
+von-private/

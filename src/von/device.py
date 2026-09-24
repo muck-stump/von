@@ -132,7 +132,13 @@ def _detect_device(device_str: Optional[str] = None) -> DeviceType:
     # 3. Intel GPU via OpenVINO (Iris Xe, Arc, Ultra iGPU/dGPU)
     if is_openvino_gpu_available():
         return OpenVINODevice("GPU")
-    # 4. CPU fallback
+    # 4. OpenVINO CPU runtime: ~1.6x the PyTorch CPU encoder on the same cores,
+    #    now that independent_options checkpoints have their own traced graph.
+    #    This is the path a CPU-only self-hosted endpoint should land on
+    #    without anyone remembering to set VON_DEVICE.
+    if is_openvino_available():
+        return OpenVINODevice("CPU")
+    # 5. PyTorch CPU fallback
     return torch.device("cpu")
 
 

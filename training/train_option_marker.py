@@ -21,7 +21,7 @@ from torch.utils.data import DataLoader, Dataset, Sampler
 from torch.utils.data.distributed import DistributedSampler
 from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 
-from von.models.option_marker import OptionMarkerModel
+from von.models.option_marker import OptionMarkerModel, split_digits
 
 
 class OptionMarkerDataset(Dataset):
@@ -217,7 +217,7 @@ class LengthBucketedBatchSampler(Sampler):
         return self._cached_len
 
 
-def collate_marker_fn(batch: List[dict], tokenizer, max_length: int = 8192):
+def collate_marker_fn(batch: List[dict], tokenizer, max_length: int = 8192, digit_split: bool = False):
     packed_texts = []
     labels = []
     soft_targets: List[Optional[List[float]]] = []
@@ -246,7 +246,8 @@ def collate_marker_fn(batch: List[dict], tokenizer, max_length: int = 8192):
 
         prefix = f"{q} {state}".strip() if q else state
         opts_packed = " ".join(f"{mask} {opt['description'].strip()}" for opt in opts)
-        packed_texts.append(f"{prefix} {sep} {opts_packed}")
+        packed = f"{prefix} {sep} {opts_packed}"
+        packed_texts.append(split_digits(packed) if digit_split else packed)
 
     encodings = tokenizer(
         packed_texts,
@@ -441,6 +442,7 @@ def train(
     max_steps: int = 0,
     init_checkpoint: Optional[str] = None,
     independent_options: bool = False,
+    digit_split: bool = False,
 ):
     is_ddp = "RANK" in os.environ
     if is_ddp:
@@ -464,6 +466,7 @@ def train(
     model = OptionMarkerModel(
         base_model_id=base_model_id,
         max_position_embeddings=max_position_embeddings,
+        digit_split=digit_split,
     ).to(device)
     if init_checkpoint:
         ckpt_path = init_checkpoint
@@ -530,7 +533,7 @@ def train(
         train_loader = DataLoader(
             train_ds,
             batch_sampler=batch_sampler,
-            collate_fn=lambda b: collate_marker_fn(b, tokenizer, max_length=max_length),
+            collate_fn=lambda b: collate_marker_fn(b, tokenizer, max_length=max_length, digit_split=digit_split),
             pin_memory=(device.type == "cuda"),
         )
     else:
@@ -540,7 +543,7 @@ def train(
             batch_size=batch_size,
             sampler=train_sampler,
             shuffle=(train_sampler is None),
-            collate_fn=lambda b: collate_marker_fn(b, tokenizer, max_length=max_length),
+            collate_fn=lambda b: collate_marker_fn(b, tokenizer, max_length=max_length, digit_split=digit_split),
             pin_memory=(device.type == "cuda"),
         )
 
@@ -548,7 +551,7 @@ def train(
         val_ds,
         batch_size=batch_size,
         shuffle=False,
-        collate_fn=lambda b: collate_marker_fn(b, tokenizer, max_length=max_length),
+        collate_fn=lambda b: collate_marker_fn(b, tokenizer, max_length=max_length, digit_split=digit_split),
         pin_memory=(device.type == "cuda"),
     )
 
@@ -659,6 +662,7 @@ def train(
                                 "init_checkpoint": init_checkpoint,
                                 "max_steps_reached": step + 1,
                                 "independent_options": independent_options,
+                                "digit_split": digit_split,
                                 "validated": False,
                                 "timestamp": time.time(),
                             },
@@ -728,6 +732,7 @@ def train(
                             "best_val_accuracy": round(best_val_acc, 4),
                             "epoch": epoch,
                             "independent_options": independent_options,
+                            "digit_split": digit_split,
                             "timestamp": time.time(),
                         },
                     )
@@ -746,6 +751,7 @@ def train(
             "base_model": base_model_id,
             "best_val_accuracy": round(best_val_acc, 4),
             "independent_options": independent_options,
+            "digit_split": digit_split,
             "timestamp": time.time(),
         }
         _write_json(os.path.join(output_dir, "marker_calibration.json"), calib_config)
@@ -794,6 +800,12 @@ if __name__ == "__main__":
                         help="Path to an existing option_marker.pt (or its containing dir) "
                              "to continue training from, instead of a fresh randomly-"
                              "initialised scoring head.")
+    parser.add_argument("--digit_split", action="store_true",
+                        help="Space out every digit in every digit run before packing "
+                             "(\"2026\" -> \"2 0 2 6\"), matching the same transform applied "
+                             "in OptionMarkerModel.pack_sequence at inference. Fixes "
+                             "ModernBERT's leading-digit-dependent BPE merging (see "
+                             "split_digits in src/von/models/option_marker.py).")
     parser.add_argument("--independent_options", action="store_true",
                         help="Train with an attention mask + position-id scheme that blocks "
                              "option-to-option attention, making each option's logit a "
@@ -821,4 +833,5 @@ if __name__ == "__main__":
         max_steps=args.max_steps,
         init_checkpoint=args.init_checkpoint,
         independent_options=args.independent_options,
+        digit_split=args.digit_split,
     )

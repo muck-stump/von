@@ -98,6 +98,7 @@ timeout {timeout_s} /opt/von/.venv/bin/torchrun --nproc_per_node=$NUM_GPUS train
     --grad_accum_steps 2 \\
     --lr {lr} \\
     {independent_options_flag} \\
+    {digit_split_flag} \\
     --max_position_embeddings 8192 \\
     --max_steps {max_steps} \\
     --s3_target {s3_target} \\
@@ -129,6 +130,7 @@ def launch(
     lr: float = 1e-5,
     epochs: int = 1,
     independent_options: bool = False,
+    digit_split: bool = False,
     timeout_s: int = 2100,
     on_demand: bool = True,
 ):
@@ -160,6 +162,7 @@ def launch(
             lr=lr,
             epochs=epochs,
             independent_options_flag="--independent_options" if independent_options else "",
+            digit_split_flag="--digit_split" if digit_split else "",
             timeout_s=timeout_s,
         ))
 
@@ -227,6 +230,7 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--independent-options", action="store_true")
+    parser.add_argument("--digit-split", action="store_true")
     parser.add_argument("--timeout-s", type=int, default=2100)
     args = parser.parse_args()
 
@@ -239,5 +243,6 @@ if __name__ == "__main__":
         lr=args.lr,
         epochs=args.epochs,
         independent_options=args.independent_options,
+        digit_split=args.digit_split,
         timeout_s=args.timeout_s,
     )

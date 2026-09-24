@@ -30,10 +30,11 @@ import sys
 import time
 from typing import Dict, List, Optional, Tuple
 
+_JEVBENCH_PUBLIC = os.environ.get("JEVBENCH_PUBLIC", "/tmp/scratch/jevbench/datasets/public")
 TIER_FILES = {
-    "hard": "/tmp/jevbench/datasets/public/hard.jsonl",
-    "standard": "/tmp/jevbench/datasets/public/original.jsonl",
-    "easy": "/tmp/jevbench/datasets/public/easy.jsonl",
+    "hard": os.path.join(_JEVBENCH_PUBLIC, "hard.jsonl"),
+    "standard": os.path.join(_JEVBENCH_PUBLIC, "original.jsonl"),
+    "easy": os.path.join(_JEVBENCH_PUBLIC, "easy.jsonl"),
 }
 
 
@@ -128,7 +129,10 @@ def _score(row: dict) -> Optional[dict]:
             # ans.score is a continuous position on the scale (1.62), while the
             # dataset expects a discrete level. Comparing the raw float as a
             # string scored every score item wrong regardless of the answer.
-            pick = str(int(round(float(ans.score))))
+            # JevBench scores "argmax over the exact label set" on the returned
+            # distribution. round(E[level]) collapses 0-3 scales to 1 or 2:
+            # public ordinal reads 3/12 that way and 9/12 by argmax.
+            pick = max(ans.probabilities, key=ans.probabilities.get)
             conf = ans.confidence
         else:
             pick, conf = ans.choice, ans.confidence

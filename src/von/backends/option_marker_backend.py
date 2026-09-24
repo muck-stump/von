@@ -121,33 +121,84 @@ def _validate_noul_prior(raw: object) -> Optional[Dict[str, float]]:
         return None
 
 
-class OpenVINOEncoderWrapper(torch.nn.Module):
-    """Wraps an OpenVINO CompiledModel to replace PyTorch ModernBERT encoder."""
+class _IndependentOptionsEncoder(torch.nn.Module):
+    """Flat-tensor view of the encoder for tracing in independent_options mode.
 
-    def __init__(self, compiled_model):
+    The PyTorch path hands ModernBERT a dict of two bool 4D masks plus custom
+    position_ids. Tracers want tensors, not dicts, so this takes the two masks
+    as additive float tensors (0 = attend, large negative = blocked) and
+    rebuilds the dict inside the graph. Same math, same outputs.
+    """
+
+    def __init__(self, encoder: torch.nn.Module):
         super().__init__()
-        self.compiled_model = compiled_model
+        self.encoder = encoder
+
+    def forward(self, input_ids, full_mask, sliding_mask, position_ids):
+        out = self.encoder(
+            input_ids=input_ids,
+            attention_mask={"full_attention": full_mask, "sliding_attention": sliding_mask},
+            position_ids=position_ids,
+        )
+        return out.last_hidden_state
+
+
+def _bool_to_additive(mask: torch.Tensor, dtype=torch.float32) -> torch.Tensor:
+    # Blocked positions get the dtype's most negative finite value, the same
+    # convention HF's mask utils use, so softmax sends them to exactly zero
+    # without producing NaN on fully-masked rows (the eye term guarantees
+    # none exist anyway).
+    return torch.zeros(mask.shape, dtype=dtype).masked_fill(~mask, torch.finfo(dtype).min)
+
+
+class OpenVINOEncoderWrapper(torch.nn.Module):
+    """Wraps OpenVINO CompiledModels to replace the PyTorch ModernBERT encoder.
+
+    Holds up to two graphs: the plain one (2D padding mask, default position
+    ids) and the independent-options one (two 4D masks + position_ids). Which
+    one runs is decided per call from the mask type, so the order-invariance
+    guarantee of independent_options checkpoints is preserved on the fast path.
+    """
+
+    def __init__(self, compiled_plain=None, compiled_independent=None, config=None):
+        super().__init__()
+        self.compiled_plain = compiled_plain
+        self.compiled_independent = compiled_independent
+        # OptionMarkerModel.forward reads encoder.config.sliding_window to build
+        # the order-invariant local mask; keep the HF config reachable.
+        self.config = config
         self._local = threading.local()
 
-    def _get_infer_request(self):
-        if not hasattr(self._local, "req"):
-            self._local.req = self.compiled_model.create_infer_request()
-        return self._local.req
+    def _req(self, name: str):
+        req = getattr(self._local, name, None)
+        if req is None:
+            compiled = getattr(self, name)
+            if compiled is None:
+                raise RuntimeError(f"OpenVINO encoder has no compiled graph for '{name}'")
+            req = compiled.create_infer_request()
+            setattr(self._local, name, req)
+        return req
 
     def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, **kwargs):
-        # The traced graph only knows a 2D padding mask and default position ids.
-        # Refuse the independent-options inputs rather than silently discarding
-        # them, which would void the order-invariance guarantee.
-        if isinstance(attention_mask, dict) or kwargs.get("position_ids") is not None:
-            raise RuntimeError(
-                "OpenVINO encoder cannot run independent_options mode (4D mask dict / "
-                "custom position_ids). Use the PyTorch encoder for this checkpoint."
-            )
-        req = self._get_infer_request()
-        res = req.infer({
-            "input_ids": input_ids.cpu().numpy(),
-            "attention_mask": attention_mask.cpu().numpy(),
-        })
+        position_ids = kwargs.get("position_ids")
+        if isinstance(attention_mask, dict):
+            if position_ids is None:
+                raise RuntimeError("independent_options mask dict requires position_ids")
+            req = self._req("compiled_independent")
+            res = req.infer({
+                "input_ids": input_ids.cpu().numpy(),
+                "full_mask": _bool_to_additive(attention_mask["full_attention"]).numpy(),
+                "sliding_mask": _bool_to_additive(attention_mask["sliding_attention"]).numpy(),
+                "position_ids": position_ids.cpu().numpy(),
+            })
+        else:
+            if position_ids is not None:
+                raise RuntimeError("plain OpenVINO graph does not accept custom position_ids")
+            req = self._req("compiled_plain")
+            res = req.infer({
+                "input_ids": input_ids.cpu().numpy(),
+                "attention_mask": attention_mask.cpu().numpy(),
+            })
         last_hidden = torch.from_numpy(res[0])
 
         class _Output:
@@ -158,8 +209,7 @@ class OpenVINOEncoderWrapper(torch.nn.Module):
         return out
 
 
-def _compile_openvino_encoder(encoder: torch.nn.Module, target: str = "GPU") -> torch.nn.Module:
-    """Compiles PyTorch ModernBERT encoder to OpenVINO with disk caching."""
+def _ov_core_with_cache(target: str):
     import openvino as ov
 
     core = ov.Core()
@@ -169,7 +219,14 @@ def _compile_openvino_encoder(encoder: torch.nn.Module, target: str = "GPU") -> 
         core.set_property(target, {"CACHE_DIR": cache_dir})
     except Exception:
         pass
+    return core, cache_dir
 
+
+def _compile_openvino_encoder(encoder: torch.nn.Module, target: str = "GPU") -> torch.nn.Module:
+    """Compiles the PyTorch ModernBERT encoder (plain mode) to OpenVINO with disk caching."""
+    import openvino as ov
+
+    core, cache_dir = _ov_core_with_cache(target)
     xml_path = os.path.join(cache_dir, f"encoder_{VON_MODEL_ID}.xml")
     if os.path.exists(xml_path):
         compiled_model = core.compile_model(xml_path, device_name=target)
@@ -185,7 +242,47 @@ def _compile_openvino_encoder(encoder: torch.nn.Module, target: str = "GPU") -> 
 
     dev_name = core.get_property(target, "FULL_DEVICE_NAME") if target in core.available_devices else target
     print(f"[von] Accelerated ModernBERT encoder on {dev_name} via OpenVINO")
-    return OpenVINOEncoderWrapper(compiled_model)
+    return OpenVINOEncoderWrapper(compiled_plain=compiled_model, config=encoder.config)
+
+
+def _compile_openvino_independent_encoder(encoder: torch.nn.Module, target: str = "GPU") -> torch.nn.Module:
+    """Compiles the encoder in independent_options mode (4D masks + position_ids).
+
+    Shapes are fully dynamic in batch and sequence so one graph serves every
+    packed length; the XML is cached next to the plain graph.
+    """
+    import openvino as ov
+
+    core, cache_dir = _ov_core_with_cache(target)
+    xml_path = os.path.join(cache_dir, f"encoder_indep_{VON_MODEL_ID}.xml")
+    if os.path.exists(xml_path):
+        compiled_model = core.compile_model(xml_path, device_name=target)
+    else:
+        wrapper = _IndependentOptionsEncoder(encoder).eval()
+        S = 128
+        ex = {
+            "input_ids": torch.ones((1, S), dtype=torch.long),
+            "full_mask": torch.zeros((1, 1, S, S), dtype=torch.float32),
+            "sliding_mask": torch.zeros((1, 1, S, S), dtype=torch.float32),
+            "position_ids": torch.arange(S, dtype=torch.long).unsqueeze(0),
+        }
+        dyn = ov.Dimension(-1)
+        ov_model = ov.convert_model(
+            wrapper,
+            example_input=ex,
+            input=[
+                ("input_ids", ov.PartialShape([dyn, dyn]), ov.Type.i64),
+                ("full_mask", ov.PartialShape([dyn, 1, dyn, dyn]), ov.Type.f32),
+                ("sliding_mask", ov.PartialShape([dyn, 1, dyn, dyn]), ov.Type.f32),
+                ("position_ids", ov.PartialShape([dyn, dyn]), ov.Type.i64),
+            ],
+        )
+        ov.save_model(ov_model, xml_path)
+        compiled_model = core.compile_model(ov_model, device_name=target)
+
+    dev_name = core.get_property(target, "FULL_DEVICE_NAME") if target in core.available_devices else target
+    print(f"[von] Accelerated ModernBERT encoder (independent_options) on {dev_name} via OpenVINO")
+    return OpenVINOEncoderWrapper(compiled_independent=compiled_model, config=encoder.config)
 
 class OptionMarkerBackend(BaseBackend):
     """Native System One decision backend powered by Option-Marker joint attention."""
@@ -324,6 +421,7 @@ class OptionMarkerBackend(BaseBackend):
                             self._calib_map = _validate_calibration_map(cdata.get("calibration_map"))
                             self._noul_prior = _validate_noul_prior(cdata.get("noul_zero_shot_prior"))
                             self._independent_options = bool(cdata.get("independent_options", False))
+                            model.digit_split = bool(cdata.get("digit_split", False))
                     except Exception:
                         self._default_temp = 1.0
                         self._calib_map = None
@@ -343,22 +441,14 @@ class OptionMarkerBackend(BaseBackend):
                 else:
                     print(f"[von] Loaded {VON_MODEL_ID} weights from {loaded_from} (uncalibrated, T=1.0)")
 
-                # OpenVINO acceleration swaps the encoder for a graph traced with a
-                # plain 2D padding mask and default position ids. The order-invariant
-                # mode feeds a per-layer 4D mask dict plus custom position_ids, which
-                # that graph cannot accept; silently dropping them would void the
-                # invariance guarantee. Decide only after the calibration file has
-                # told us which mode this checkpoint needs.
+                # OpenVINO needs a different traced graph per attention mode: the
+                # plain one takes a 2D padding mask; the order-invariant one takes
+                # two 4D masks plus custom position_ids. Decide only after the
+                # calibration file has told us which mode this checkpoint needs.
                 if self.is_openvino:
                     if self._independent_options:
-                        warnings.warn(
-                            "[von] OpenVINO acceleration is not yet supported for checkpoints "
-                            "trained in independent_options mode (needs a 4D mask + position_ids "
-                            "in the traced graph). Falling back to the PyTorch CPU encoder so the "
-                            "order-invariance guarantee is preserved.",
-                            UserWarning,
-                            stacklevel=2,
-                        )
+                        model.encoder = _compile_openvino_independent_encoder(
+                            model.encoder, target=self.openvino_target)
                     else:
                         model.encoder = _compile_openvino_encoder(model.encoder, target=self.openvino_target)
 

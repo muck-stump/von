@@ -13,11 +13,30 @@ Two attention modes:
   See build_independent_option_masks / build_option_invariant_position_ids.
 """
 
+import re
 from typing import List, Optional, Tuple
 import torch
 import torch.nn as nn
 from transformers import AutoModel, AutoTokenizer
 
+_DIGIT_RUN_RE = re.compile(r"\d+")
+
+
+def split_digits(text: str) -> str:
+    """Space out every digit in every digit run: "2026" -> "2 0 2 6".
+
+    ModernBERT's BPE merges multi-digit runs inconsistently by leading digit
+    ("2026" -> "20"+"26", "692" -> "6"+"92", "500" -> one token) -- the same
+    magnitude tokenizes differently depending on what it starts with, which
+    makes digit-level arithmetic unlearnable from a training set this size
+    (see benchmarks/probe_numeral_sensitivity.py: 70% of picks survive full
+    digit randomisation). Splitting every digit into its own token removes
+    that inconsistency. Must be applied identically at training time
+    (`training/train_option_marker.py`'s `collate_marker_fn`) and here, or the
+    two paths silently diverge -- gated by the same `digit_split` flag,
+    persisted in `marker_calibration.json` so old checkpoints are unaffected.
+    """
+    return _DIGIT_RUN_RE.sub(lambda m: " ".join(m.group(0)), text)
 
 class OptionMarkerScorer(nn.Module):
     """Calibrated MLP scoring head for option-marker representations."""
@@ -145,6 +164,7 @@ class OptionMarkerModel(nn.Module):
         base_model_id: str = "checkpoints/von-modernbert-rlcd",
         max_position_embeddings: int = 8192,
         dropout: float = 0.1,
+        digit_split: bool = False,
     ):
         super().__init__()
         from transformers import AutoConfig
@@ -155,6 +175,7 @@ class OptionMarkerModel(nn.Module):
         self.scorer = OptionMarkerScorer(hidden_size=self.hidden_size, dropout=dropout)
         self.tokenizer = AutoTokenizer.from_pretrained(base_model_id, model_max_length=max_position_embeddings)
         self.mask_token_id = self.tokenizer.mask_token_id
+        self.digit_split = digit_split
 
     def forward(
         self,
@@ -203,4 +224,5 @@ class OptionMarkerModel(nn.Module):
         sep = self.tokenizer.sep_token
         prefix = f"{question} {state}".strip() if question else state.strip()
         opts_packed = " ".join(f"{mask} {opt.strip()}" for opt in options)
-        return f"{prefix} {sep} {opts_packed}"
+        packed = f"{prefix} {sep} {opts_packed}"
+        return split_digits(packed) if self.digit_split else packed
