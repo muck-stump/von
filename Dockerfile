@@ -7,9 +7,9 @@ RUN pip install --no-cache-dir uv
 COPY . /app
 WORKDIR /app
 
-# uv.toml provides the IBM ppc64le index for torch; delete uv.lock so uv resolves
-# fresh for this architecture and uses the IBM wheel index for torch
-RUN rm -f uv.lock && uv sync --no-dev --default-index https://wheels.developerfirst.ibm.com/ppc64le/linux --index https://pypi.org/simple --index-strategy unsafe-best-match
+# uv.toml configures index-strategy = "unsafe-best-match" and the IBM ppc64le wheel index;
+# delete uv.lock so uv re-resolves cleanly for this architecture
+RUN rm -f uv.lock && uv sync --no-dev
 
 EXPOSE 8000
 
