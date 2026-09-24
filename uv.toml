@@ -1,2 +1,5 @@
 [[index]]
 url = "https://wheels.developerfirst.ibm.com/ppc64le/linux"
+
+[pip]
+index-strategy = "unsafe-best-match"
