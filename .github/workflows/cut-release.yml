@@ -1,0 +1,81 @@
+name: Cut a Release
+
+# Single entry point for shipping a version: verifies pyproject.toml already
+# carries the target version, tags it, creates a proper GitHub Release (a
+# real Release object with a rendered title and body -- a bare `git tag &&
+# git push` only leaves a lightweight tag, which GitHub shows as a small grey
+# commit-message blurb on the tags page, not a Release), and then explicitly
+# dispatches publish-pypi.yml.
+#
+# That last step is not automatic: a tag pushed here using the default
+# GITHUB_TOKEN does NOT fire publish-pypi.yml's `on: push: tags` trigger --
+# GitHub blocks GITHUB_TOKEN-authored events from starting new workflow runs
+# to prevent infinite chains. workflow_dispatch is explicitly exempted from
+# that restriction, so this workflow calls publish-pypi.yml directly instead
+# of relying on the tag push to cascade into it.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, matching pyproject.toml (e.g. 1.2.2, no leading v)"
+        required: true
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify pyproject.toml matches the requested version
+        run: |
+          set -euo pipefail
+          PROJECT=$(grep -m1 '^version' pyproject.toml | sed -E 's/.*"(.*)".*/\1/')
+          if [ "$PROJECT" != "${{ inputs.version }}" ]; then
+            echo "::error::pyproject.toml is $PROJECT, requested release is ${{ inputs.version }}. Bump and commit pyproject.toml (and src/von/__init__.py) on master first, then re-run this workflow."
+            exit 1
+          fi
+
+      - name: Refuse to re-cut an existing tag
+        run: |
+          set -euo pipefail
+          if git rev-parse "v${{ inputs.version }}" >/dev/null 2>&1; then
+            echo "::error::Tag v${{ inputs.version }} already exists."
+            exit 1
+          fi
+
+      - name: Create and push the tag
+        run: |
+          set -euo pipefail
+          git tag "v${{ inputs.version }}" "${{ github.sha }}"
+          git push origin "v${{ inputs.version }}"
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "v${{ inputs.version }}" \
+            --title "von-sdk ${{ inputs.version }}" \
+            --verify-tag \
+            --generate-notes
+
+      - name: Dispatch the PyPI publish (not a dry run)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh workflow run publish-pypi.yml --ref "v${{ inputs.version }}" -f dry_run=false
+
+      - name: Summary
+        run: |
+          {
+            echo "### Cut v${{ inputs.version }}"
+            echo ""
+            echo "- Tag and GitHub Release: https://github.com/${{ github.repository }}/releases/tag/v${{ inputs.version }}"
+            echo "- PyPI publish dispatched (workflow_dispatch, dry_run=false): https://github.com/${{ github.repository }}/actions/workflows/publish-pypi.yml"
+          } >> "$GITHUB_STEP_SUMMARY"

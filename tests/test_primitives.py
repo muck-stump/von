@@ -51,3 +51,20 @@ def test_rate_helper():
     assert 0.0 <= ans.score <= 2.0
     assert ans.score > 1.0
     assert "2" in ans.probabilities
+
+
+def test_decide_single_option_does_not_crash():
+    # Laya issue-tracker research: an unguarded topk(2) crashes on a
+    # single-option Choice. Von's confidence math special-cases n<=1, so
+    # this should resolve trivially rather than raise.
+    ans = von.decide("anything", choices={"only_option": "the only option"})
+    assert ans.choice == "only_option"
+    assert ans.probabilities == {"only_option": 1.0}
+    assert ans.confidence == 1.0
+
+
+def test_rate_single_level_does_not_crash():
+    ans = von.rate("anything", criteria=["only level"])
+    assert ans.score == 0.0
+    assert ans.confidence == 1.0
+    assert ans.legend == {"0": "only level"}

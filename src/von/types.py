@@ -1,15 +1,26 @@
 """Types and schemas for Von decision primitives."""
 
+import json
 import warnings
 from typing import Any, Dict, List, Literal, Optional, Union
-from pydantic import BaseModel, Field, ConfigDict, model_validator
-
+from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 
 # Legacy spellings of Noul's criteria keys. The presets once passed these, and
 # pydantic's default extra="ignore" dropped them silently, so every such Noul ran
 # zero-shot with context-free debiasing instead of against its stated criteria.
 _LEGACY_NOUL_CRITERIA = {"pos_criteria": "true", "neg_criteria": "false"}
 
+
+
+# TypeSafe's OpenAPI allows `instructions` (and Score's per-level descriptions,
+# already handled separately below) to be a string, object, or array -- callers
+# use structured instructions as a way to pass machine-checkable criteria
+# alongside the prose. Von's model only ever consumes text, so non-strings are
+# serialised to canonical JSON rather than rejected with a 422.
+def _stringify_instructions(v: Any) -> Any:
+    if isinstance(v, (dict, list)):
+        return json.dumps(v, sort_keys=isinstance(v, dict))
+    return v
 
 class Noul(BaseModel):
     """A yes/no probability question."""
@@ -41,6 +52,11 @@ class Noul(BaseModel):
         data["criteria"] = criteria or None
         return data
 
+    @field_validator("instructions", mode="before")
+    @classmethod
+    def _coerce_instructions(cls, v: Any) -> Any:
+        return _stringify_instructions(v)
+
 
 class Choice(BaseModel):
     """Pick one option from a fixed list with probability distribution."""
@@ -48,11 +64,21 @@ class Choice(BaseModel):
     instructions: str
     criteria: Dict[str, Optional[str]]
 
+    @field_validator("instructions", mode="before")
+    @classmethod
+    def _coerce_instructions(cls, v: Any) -> Any:
+        return _stringify_instructions(v)
+
 
 class Score(BaseModel):
     """A position on an ordered scale (2 to 10 levels)."""
     type: Literal["score"] = "score"
     instructions: str
+
+    @field_validator("instructions", mode="before")
+    @classmethod
+    def _coerce_instructions(cls, v: Any) -> Any:
+        return _stringify_instructions(v)
     criteria: List[Union[str, Dict[str, Any]]]
 
 

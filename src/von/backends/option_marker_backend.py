@@ -30,6 +30,22 @@ from ..device import _detect_device, OpenVINODevice
 from ..models.option_marker import OptionMarkerModel
 
 
+
+def _margin_confidence(probs: List[float]) -> float:
+    """TypeSafe's confidence metric: (n * p_max - 1) / (n - 1).
+
+    Equal to the top1-minus-top2 margin only at n=2; for n>2 it stays anchored
+    to the n-way chance baseline (1/n) instead of drifting down as options are
+    added, which a raw top1-vs-top2 margin does even when p_max is unambiguous.
+    n<=1 has no second option to be uncertain against, so it is maximally
+    confident.
+    """
+    n = len(probs)
+    if n <= 1:
+        return 1.0
+    p_max = max(probs)
+    conf = (n * p_max - 1) / (n - 1)
+    return round(max(0.0, min(1.0, conf)), 3)
 def _format_state(state: Any) -> str:
     if isinstance(state, str):
         return state
@@ -393,8 +409,7 @@ class OptionMarkerBackend(BaseBackend):
         best_choice = options[best_idx]
         prob_dict = {opt: round(p, 4) for opt, p in zip(options, probs)}
 
-        sorted_p = sorted(probs, reverse=True)
-        conf = round(max(0.0, min(1.0, sorted_p[0] - (sorted_p[1] if len(sorted_p) > 1 else 0.0))), 3)
+        conf = _margin_confidence(probs)
 
         return ChoiceAnswer(choice=best_choice, probabilities=prob_dict, confidence=conf)
 
@@ -523,8 +538,7 @@ class OptionMarkerBackend(BaseBackend):
         prob_dict = {str(i): round(p, 4) for i, p in enumerate(probs)}
         weighted_score = round(sum(i * p for i, p in enumerate(probs)), 2)
 
-        sorted_p = sorted(probs, reverse=True)
-        conf = round(max(0.0, min(1.0, sorted_p[0] - (sorted_p[1] if len(sorted_p) > 1 else 0.0))), 3)
+        conf = _margin_confidence(probs)
 
         return ScoreAnswer(
             score=weighted_score,

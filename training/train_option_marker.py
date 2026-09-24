@@ -11,6 +11,7 @@ import json
 import math
 import os
 import random
+import tempfile
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -317,10 +318,32 @@ def compute_marker_rlcd_loss(
 
 
 def _write_json(path: str, payload: dict) -> None:
-    """Write JSON, naming the path if the write fails."""
+    """Write JSON atomically: temp file in the same directory + os.replace.
+
+    marker_calibration.json is read at serve time by OptionMarkerBackend, and
+    written here mid-training on instances that can be killed at any moment
+    (the watchdog in launch_universal_training.py did exactly this once --
+    see 8fd35a3db9c5). A plain open(path, 'w') truncates the file before
+    writing the replacement, so a kill between truncate and flush leaves a
+    zero-byte or partial file; a reader (or the next training run resuming
+    from it) gets a JSONDecodeError instead of the last-good config. Writing
+    to a sibling temp file and renaming over the target is atomic on POSIX
+    (same filesystem, same directory) -- readers see either the old file or
+    the new one, never a partial one.
+    """
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
+        directory = os.path.dirname(path) or "."
+        fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".tmp-", suffix=".json")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, path)
+        except BaseException:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            raise
     except OSError as exc:
         raise RuntimeError(f"Cannot write {path!r}: {exc}") from exc
 
