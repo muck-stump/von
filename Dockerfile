@@ -8,8 +8,8 @@ COPY . /app
 WORKDIR /app
 
 # uv.toml provides the IBM ppc64le index for torch; delete uv.lock so uv resolves
-# fresh for this architecture instead of using the x86-locked torch 2.14.0
-RUN rm -f uv.lock && uv sync --no-dev --index-strategy unsafe-best-match
+# fresh for this architecture and uses the IBM wheel index for torch
+RUN rm -f uv.lock && uv sync --no-dev --default-index https://wheels.developerfirst.ibm.com/ppc64le/linux --index https://pypi.org/simple --index-strategy unsafe-best-match
 
 EXPOSE 8000
 
