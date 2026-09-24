@@ -7,9 +7,9 @@ RUN pip install --no-cache-dir uv
 COPY . /app
 WORKDIR /app
 
-# uv.toml provides the IBM ppc64le index for torch; re-resolve without --frozen
-# so uv picks the right wheels for this architecture
-RUN uv sync --no-dev
+# uv.toml provides the IBM ppc64le index for torch; delete uv.lock so uv resolves
+# fresh for this architecture instead of using the x86-locked torch 2.14.0
+RUN rm -f uv.lock && uv sync --no-dev
 
 EXPOSE 8000
 
