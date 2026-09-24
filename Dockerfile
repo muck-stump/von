@@ -11,6 +11,14 @@ WORKDIR /app
 # delete uv.lock so uv re-resolves cleanly for this architecture
 RUN rm -f uv.lock && uv sync --no-dev
 
+# Pre-download model weights from HF Hub into the local checkpoint directory so
+# the image is self-contained and needs no network access at inference time.
+RUN mkdir -p checkpoints/von-1.2 && \
+    .venv/bin/python -c " \
+from huggingface_hub import hf_hub_download, snapshot_download; \
+snapshot_download(repo_id='wfzyx/von', local_dir='checkpoints/von-1.2', ignore_patterns=['*.md','*.txt']); \
+print('Model weights baked in.')"
+
 # Run as non-root (OpenShift arbitrary-UID compatible: group 0 is always granted)
 RUN chown -R 1001:0 /app && chmod -R g=u /app
 USER 1001
