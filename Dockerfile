@@ -11,6 +11,10 @@ WORKDIR /app
 # delete uv.lock so uv re-resolves cleanly for this architecture
 RUN rm -f uv.lock && uv sync --no-dev
 
+# Run as non-root (OpenShift arbitrary-UID compatible: group 0 is always granted)
+RUN chown -R 1001:0 /app && chmod -R g=u /app
+USER 1001
+
 EXPOSE 8000
 
-CMD ["uv", "run", "von", "serve", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["/app/.venv/bin/von", "serve", "--host", "0.0.0.0", "--port", "8000"]
