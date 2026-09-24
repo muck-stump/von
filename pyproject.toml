@@ -30,7 +30,7 @@ dev = [
     "pytest>=9.0.0",
 ]
 intel = [
-    "openvino>=2025.0.0",
+    "openvino>=2025.0.0; sys_platform != 'linux' or (platform_machine != 'ppc64le' and platform_machine != 's390x')",
 ]
 
 [build-system]
